@@ -20,10 +20,26 @@ export class CallServer implements Party.Server {
     this.ws = conn as unknown as WebSocket; 
 
     const url = new URL(ctx.request.url);
-    const agentId = url.searchParams.get("agentId");
+    
+    // ✅ CAMBIO: Intentar obtener agentId de query params O del path
+    let agentId = url.searchParams.get("agentId");
+    
+    // Si no está en query params, intentar extraerlo del path
+    // Path format: /party/CALLSID/AGENTID
+    if (!agentId) {
+      const pathParts = url.pathname.split("/").filter(p => p);
+      // pathParts = ["party", "CA...", "agentId"]
+      if (pathParts.length >= 3) {
+        agentId = pathParts[2];
+        console.log(`[PartyKit Logic] AgentID extracted from path: ${agentId}`);
+      }
+    }
 
     if (!agentId) {
       console.error("[PartyKit Logic] FATAL: agentId is missing/null.");
+      console.error(`[PartyKit Logic] Full URL: ${ctx.request.url}`);
+      console.error(`[PartyKit Logic] Path: ${url.pathname}`);
+      console.error(`[PartyKit Logic] Query params: ${url.search}`);
       conn.close(1002, "Agent ID is required.");
       return;
     }
@@ -115,8 +131,10 @@ export class PartyKitDurable implements DurableObject {
       server.accept();
       
       const urlObj = new URL(request.url);
-      const pathSegments = urlObj.pathname.split("/");
-      const callSid = pathSegments.find(s => s.startsWith("CA")) || pathSegments[pathSegments.length - 1];
+      const pathSegments = urlObj.pathname.split("/").filter(p => p);
+      
+      // pathSegments puede ser: ["party", "CA...", "agentId"] o ["party", "CA..."]
+      const callSid = pathSegments.find(s => s.startsWith("CA")) || pathSegments[1] || "unknown";
 
       const fakeRoom: Party.Room = {
         id: callSid,
@@ -161,14 +179,16 @@ export default {
   async fetch(request: Request, env: any) {
     const url = new URL(request.url);
     
-    const pathParts = url.pathname.split("/");
+    const pathParts = url.pathname.split("/").filter(p => p);
+    
+    // pathParts puede ser: ["party", "CA...", "agentId"] o ["party", "CA..."]
     const roomName = pathParts.find(part => part.startsWith("CA")) || "default-room";
+
+    console.log(`[Router] Path: ${url.pathname}, RoomName: ${roomName}`);
 
     const id = env.PARTYKIT_DURABLE.idFromName(roomName);
     const stub = env.PARTYKIT_DURABLE.get(id);
 
-    // ✅ SOLUCIÓN: Pasar el Request completo directamente
-    // Esto preserva TODOS los headers, query params, y el body
     return stub.fetch(request);
   }
 };
