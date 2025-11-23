@@ -8,7 +8,6 @@ interface MinimalLiveSession extends LiveSession {
 }
 
 // --- TU LÓGICA ORIGINAL (CallServer) ---
-// Mantenida 100% intacta en funcionalidad
 export class CallServer implements Party.Server {
   googleAISession: MinimalLiveSession | null = null;
   ws: WebSocket | null = null; 
@@ -16,7 +15,6 @@ export class CallServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
 
   async onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
-    // LOG DE DEPURACIÓN CRÍTICO
     console.log(`[PartyKit Logic] Connecting. URL: ${ctx.request.url}`);
     
     this.ws = conn as unknown as WebSocket; 
@@ -24,10 +22,8 @@ export class CallServer implements Party.Server {
     const url = new URL(ctx.request.url);
     const agentId = url.searchParams.get("agentId");
 
-    // Validar AgentID
     if (!agentId) {
       console.error("[PartyKit Logic] FATAL: agentId is missing/null.");
-      // Importante: Si esto falla, cerramos con código de error
       conn.close(1002, "Agent ID is required.");
       return;
     }
@@ -61,7 +57,7 @@ export class CallServer implements Party.Server {
             if (audioData) {
               const twilioMessage = {
                 event: "media",
-                streamSid: this.room.id, // Esto ahora será el "CA..." correcto
+                streamSid: this.room.id,
                 media: { payload: audioData },
               };
               if (this.ws && this.ws.readyState === 1) { 
@@ -118,17 +114,12 @@ export class PartyKitDurable implements DurableObject {
       
       server.accept();
       
-      // TRUCO: Extraemos el ID de la llamada (CA...) directamente de la URL
-      // para asegurar que coincida con lo que Twilio envió.
       const urlObj = new URL(request.url);
-      // La URL es tipo ".../party/CA12345?agentId=..."
       const pathSegments = urlObj.pathname.split("/");
-      // Buscamos el segmento que empieza por 'CA' o tomamos el último si no estamos seguros
       const callSid = pathSegments.find(s => s.startsWith("CA")) || pathSegments[pathSegments.length - 1];
 
-      // Simulamos el objeto "Room" de PartyKit con el ID CORRECTO
       const fakeRoom: Party.Room = {
-        id: callSid, // IMPORTANTE: Esto pasa el CallSid correcto a tu lógica
+        id: callSid,
         internalID: this.state.id.toString(),
         env: this.env, 
         storage: this.state.storage,
@@ -142,10 +133,8 @@ export class PartyKitDurable implements DurableObject {
       const conn = server as unknown as Party.Connection;
       conn.id = "twilio-conn-" + callSid;
       
-      // Pasamos la request original que TRAE los query params
       const ctx = { request } as Party.ConnectionContext;
       
-      // Ejecutamos tu lógica
       await partyServer.onConnect(conn, ctx);
 
       server.addEventListener("message", (event) => {
@@ -172,18 +161,14 @@ export default {
   async fetch(request: Request, env: any) {
     const url = new URL(request.url);
     
-    // Lógica de enrutamiento robusta:
-    // Vercel manda: /party/CAxxxxxxx?agentId=yyyy
-    // Extraemos "CAxxxxxxx" para usarlo como nombre de la Durable Object
     const pathParts = url.pathname.split("/");
     const roomName = pathParts.find(part => part.startsWith("CA")) || "default-room";
 
-    // Obtenemos la instancia específica para esta llamada
     const id = env.PARTYKIT_DURABLE.idFromName(roomName);
     const stub = env.PARTYKIT_DURABLE.get(id);
 
-    // CORRECCIÓN CLAVE: Pasamos request.url explícitamente como primer argumento.
-    // Esto obliga a que los Query Parameters (?agentId=...) viajen al Durable Object.
-    return stub.fetch(request.url, request);
+    // ✅ SOLUCIÓN: Pasar el Request completo directamente
+    // Esto preserva TODOS los headers, query params, y el body
+    return stub.fetch(request);
   }
 };
