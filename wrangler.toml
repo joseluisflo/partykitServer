@@ -1,15 +1,26 @@
-# CAMBIO CLAVE: El nombre debe coincidir con la URL del log (partykit...)
 name = "partykit"
 main = "src/party/main.ts"
 compatibility_date = "2024-07-25"
 
-# Esto habilita la compatibilidad con Node.js, vital para muchas librerías de AI/Twilio
+# Habilita la compatibilidad con APIs de Node.js, necesario para firebase-admin
 compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
 name = "PARTYKIT_DURABLE"
 class_name = "PartyKitDurable"
 
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["PartyKitDurable"]
+# Enlaza la variable secreta configurada en el dashboard de Cloudflare
+[secrets]
+FIREBASE_SERVICE_ACCOUNT = "FIREBASE_SERVICE_ACCOUNT"
+GEMINI_API_KEY = "GEMINI_API_KEY"
+
+# Regla de enrutamiento para asegurar que las peticiones se dirijan al Durable Object
+[[rules]]
+type = "ESModule"
+globs = ["**/*.js", "**/*.mjs"]
+fallthrough = true
+
+[[rules]]
+type = "Data"
+globs = ["**/*.wasm", "**/*.bin", "**/*.html"]
+fallthrough = true
