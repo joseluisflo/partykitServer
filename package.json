@@ -6,7 +6,6 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "firebase-admin": "^12.2.0",
     "partykit": "^0.0.101",
     "@google/genai": "^0.15.0",
     "ws": "^8.18.0"

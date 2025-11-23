@@ -1,123 +1,42 @@
 import type * as Party from "partykit/server";
 import { GoogleGenAI, type LiveSession, Modality } from "@google/genai";
-import * as admin from 'firebase-admin';
 
-// --- INTERFACES ---
+// The LiveSession type from Google's SDK is not fully exported,
+// so we define a minimal interface to satisfy TypeScript.
 interface MinimalLiveSession extends LiveSession {
   close(): void;
   sendRealtimeInput(request: { media: { data: string; mimeType: string; } } | { text: string }): void;
 }
 
-interface Agent {
-    instructions?: string;
-    inCallWelcomeMessage?: string;
-    agentVoice?: string;
-    textSources?: { title: string; content: string }[];
-    fileSources?: { name: string; extractedText?: string }[];
-}
-
-// --- LÓGICA DEL SERVIDOR ---
 export class PartyKitDurable implements Party.Server {
   googleAISession: MinimalLiveSession | null = null;
   ws: WebSocket | null = null;
-  firebaseInitialized = false;
 
-  constructor(readonly room: Party.Room) {
-    // Inicializar Firebase tan pronto como se crea el objeto
-    this.maybeInitializeFirebase();
-  }
-
-  // Inicializa Firebase Admin SDK si no lo ha hecho ya
-  maybeInitializeFirebase() {
-    if (admin.apps.length === 0) {
-      try {
-        const serviceAccount = JSON.parse(this.room.env.FIREBASE_SERVICE_ACCOUNT as string);
-        admin.initializeApp({
-          credential: admin.credential.cert(serviceAccount)
-        });
-        this.firebaseInitialized = true;
-        console.log("[Firebase] Admin SDK initialized successfully.");
-      } catch (e) {
-        console.error("[Firebase] Failed to initialize Admin SDK:", e);
-        this.firebaseInitialized = false;
-      }
-    } else {
-        this.firebaseInitialized = true;
-    }
-  }
-  
-  // Obtiene los datos del agente desde Firestore
-  async getAgentConfig(agentId: string): Promise<Agent | null> {
-    if (!this.firebaseInitialized) {
-        console.error("[Firestore] Firebase not initialized, cannot fetch agent config.");
-        return null;
-    }
-    try {
-        // Firestore no es compatible con collectionGroup en el SDK de Admin, así que buscamos la ruta completa.
-        // Esto asume una estructura de ruta predecible.
-        // Una solución más robusta podría implicar una colección raíz de agentes si los usuarios se vuelven muy numerosos.
-        const firestore = admin.firestore();
-        const usersSnapshot = await firestore.collection('users').get();
-        for (const userDoc of usersSnapshot.docs) {
-            const agentRef = firestore.collection('users').doc(userDoc.id).collection('agents').doc(agentId);
-            const agentDoc = await agentRef.get();
-            if (agentDoc.exists) {
-                console.log(`[Firestore] Found agent ${agentId} for user ${userDoc.id}`);
-                return agentDoc.data() as Agent;
-            }
-        }
-        console.warn(`[Firestore] Agent with ID ${agentId} not found across all users.`);
-        return null;
-    } catch (error) {
-        console.error(`[Firestore] Error fetching agent config for ${agentId}:`, error);
-        return null;
-    }
-  }
-
+  constructor(readonly room: Party.Room) {}
 
   async onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
-    this.ws = conn;
-    console.log(`[PartyKit] Twilio connected: ${conn.id}`);
+    this.ws = conn as WebSocket;
+    console.log(`[PartyKit] Connection received for room: ${this.room.id}`);
 
     const url = new URL(ctx.request.url);
-    const agentId = url.pathname.split('/')[3] || url.searchParams.get("agentId");
+    
+    // Configuration is now passed via query parameters
+    const systemInstruction = url.searchParams.get("systemInstruction");
+    const agentVoice = url.searchParams.get("agentVoice") || 'Zephyr';
 
-    if (!agentId) {
-      console.error("[PartyKit] Error: agentId is missing from the URL.");
-      conn.close(1002, "Agent ID is required.");
+    if (!systemInstruction) {
+      console.error("[PartyKit] Error: systemInstruction is missing from query parameters.");
+      this.ws.close(1002, "System instruction is required.");
       return;
     }
-    console.log(`[PartyKit] AgentID identified: ${agentId}`);
 
-    const agentConfig = await this.getAgentConfig(agentId);
-    if (!agentConfig) {
-      conn.close(1011, `Agent configuration for ${agentId} not found.`);
+    if (!this.room.env.GEMINI_API_KEY) {
+      console.error("[PartyKit] Error: GEMINI_API_KEY is not set in PartyKit secrets.");
+      this.ws.close(1011, "AI service is not configured.");
       return;
     }
 
     const ai = new GoogleGenAI({ apiKey: this.room.env.GEMINI_API_KEY as string });
-
-    const knowledge = [
-      ...(agentConfig.textSources || []).map(t => `Title: ${t.title}\nContent: ${t.content}`),
-      ...(agentConfig.fileSources || []).map(f => `File: ${f.name}\nContent: ${f.extractedText || ''}`)
-    ].join('\n\n---\n\n');
-
-    const systemInstruction = `
-      You are a voice AI. Your goal is to be as responsive as possible. Your first response to a user MUST be an immediate, short acknowledgment. Then, you will provide the full answer.
-      This is a real-time conversation. Keep all your answers concise and to the point. Prioritize speed. Do not use filler phrases.
-      ${agentConfig.inCallWelcomeMessage ? `Your very first response in this conversation must be: "${agentConfig.inCallWelcomeMessage}"` : ''}
-
-      Your instructions and persona are defined below.
-
-      ### Instructions & Persona
-      ${agentConfig.instructions || 'You are a helpful assistant.'}
-              
-      ### Knowledge Base
-      Use the following information to answer questions. This is your primary source of truth.
-      ---
-      ${knowledge}
-      ---
-    `;
 
     try {
       this.googleAISession = (await ai.live.connect({
@@ -127,13 +46,14 @@ export class PartyKitDurable implements Party.Server {
           inputAudioTranscription: { interruptions: true },
           outputAudioTranscription: {},
           speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: agentConfig.agentVoice || 'Zephyr' } },
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: agentVoice } },
           },
-          systemInstruction,
+          systemInstruction: decodeURIComponent(systemInstruction), // Decode the instruction
         },
         callbacks: {
           onopen: () => {
             console.log("[PartyKit] Google AI session opened.");
+            // Programmatically start the conversation
             this.googleAISession?.sendRealtimeInput({ text: "start" });
           },
           onmessage: (message) => {
@@ -177,7 +97,7 @@ export class PartyKitDurable implements Party.Server {
                 }
             });
         } else if (twilioMessage.event === 'stop') {
-            console.log('[PartyKit] Twilio stream stopped message received.');
+            console.log('[PartyKit] Twilio stream stop message received.');
             this.onClose();
         }
     } catch (e) {
@@ -194,7 +114,7 @@ export class PartyKitDurable implements Party.Server {
   }
 }
 
-// Punto de entrada para el router de PartyKit
+// Entrypoint for the PartyKit router
 export default class MainServer implements Party.Server {
   constructor(readonly room: Party.Room) {}
 
@@ -202,7 +122,6 @@ export default class MainServer implements Party.Server {
     const url = new URL(ctx.request.url);
     const pathParts = url.pathname.split("/").filter(p => p);
     
-    // El nombre de la "habitación" (Durable Object) es el Call SID de Twilio
     const roomName = pathParts.find(part => part.startsWith("CA"));
     
     if (!roomName) {
@@ -210,14 +129,11 @@ export default class MainServer implements Party.Server {
       conn.close(1002, "Invalid URL format. Call SID is missing.");
       return;
     }
-    console.log(`[Router] Path: ${url.pathname}, RoomName: ${roomName}`);
     
     const durableObjectId = this.room.context.parties.main.idFromName(roomName);
     const durableObjectStub = this.room.context.parties.main.get(durableObjectId);
     
-    // Reenvía la conexión al Durable Object
+    // Forward the connection to the Durable Object
     return durableObjectStub.fetch(ctx.request);
   }
 }
-
-MainServer satisfies Party.Worker;

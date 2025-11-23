@@ -2,25 +2,29 @@ name = "partykit"
 main = "src/party/main.ts"
 compatibility_date = "2024-07-25"
 
-# Habilita la compatibilidad con APIs de Node.js, necesario para firebase-admin
+# Enable Node.js compatibility APIs
 compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
 name = "PARTYKIT_DURABLE"
 class_name = "PartyKitDurable"
 
-# Enlaza la variable secreta configurada en el dashboard de Cloudflare
-[secrets]
-FIREBASE_SERVICE_ACCOUNT = "FIREBASE_SERVICE_ACCOUNT"
-GEMINI_API_KEY = "GEMINI_API_KEY"
+[[migrations]]
+tag = "v1"
+new_classes = ["PartyKitDurable"]
 
-# Regla de enrutamiento para asegurar que las peticiones se dirijan al Durable Object
+# The secrets are no longer needed here as Firebase logic is removed
+# [secrets]
+# FIREBASE_SERVICE_ACCOUNT = "FIREBASE_SERVICE_ACCOUNT"
+# GEMINI_API_KEY = "GEMINI_API_KEY"
+
+# This rule is essential for routing WebSocket requests to the Durable Object
 [[rules]]
 type = "ESModule"
-globs = ["**/*.js", "**/*.mjs"]
+globs = ["**/*.mjs"]
 fallthrough = true
 
 [[rules]]
 type = "Data"
-globs = ["**/*.wasm", "**/*.bin", "**/*.html"]
+globs = ["**/*.wasm", "**/*.bin"]
 fallthrough = true
