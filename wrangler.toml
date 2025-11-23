@@ -1,0 +1,12 @@
+
+name = "agentverse-calls"
+main = "src/party/main.ts"
+compatibility_date = "2024-07-25"
+
+[[durable_objects.bindings]]
+name = "PARTYKIT_DURABLE"
+class_name = "PartyKitDurable"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["PartyKitDurable"]
