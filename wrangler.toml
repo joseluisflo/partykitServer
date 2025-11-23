@@ -1,6 +1,10 @@
+# CAMBIO CLAVE: El nombre debe coincidir con la URL del log (partykit...)
 name = "partykit"
 main = "src/party/main.ts"
 compatibility_date = "2024-07-25"
+
+# Esto habilita la compatibilidad con Node.js, vital para muchas librerías de AI/Twilio
+compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
 name = "PARTYKIT_DURABLE"

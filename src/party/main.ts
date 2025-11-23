@@ -1,38 +1,99 @@
-
-import type * as Party from "partykit/server";
 import { GoogleGenAI, type LiveSession } from "@google/genai";
 
-// The LiveSession type from Google's SDK is not fully exported,
-// so we define a minimal interface to satisfy TypeScript.
+// Definición mínima para TypeScript
 interface MinimalLiveSession extends LiveSession {
   close(): void;
   sendRealtimeInput(request: { media: { data: string; mimeType: string; } } | { text: string }): void;
 }
 
-export default class CallServer implements Party.Server {
+// 1. EL DURABLE OBJECT (Tu "Hotel" con estado)
+export class PartyKitDurable {
+  state: DurableObjectState;
+  env: any;
   googleAISession: MinimalLiveSession | null = null;
-  
-  constructor(readonly room: Party.Room) {}
 
-  async onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
-    console.log(`[PartyKit] Twilio connected: ${conn.id}`);
+  constructor(state: DurableObjectState, env: any) {
+    this.state = state;
+    this.env = env;
+  }
 
-    const agentId = new URL(ctx.request.url).searchParams.get("agentId");
-     if (!agentId) {
-      console.error("[PartyKit] Error: agentId is missing from the connection URL.");
-      conn.close(1002, "Agent ID is required.");
-      return;
+  // ESTE ES EL METODO QUE TE FALTABA: El punto de entrada nativo
+  async fetch(request: Request) {
+    // Si es una petición de WebSocket, hacemos el upgrade
+    if (request.headers.get("Upgrade") === "websocket") {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+
+      // Manejamos la conexión WebSocket
+      this.handleWebSocket(server, request);
+
+      return new Response(null, {
+        status: 101,
+        webSocket: client,
+      });
     }
+
+    // Si no es WebSocket, respondemos algo básico
+    return new Response("Este es un servidor WebSocket para Twilio/GoogleAI", { status: 200 });
+  }
+
+  // Aquí adaptamos tu lógica original "onConnect"
+  async handleWebSocket(ws: WebSocket, request: Request) {
+    ws.accept(); // Aceptamos la conexión
     
-    // 1. Initialize Google AI
-    if (!process.env.GEMINI_API_KEY) {
-      console.error("[PartyKit] Error: GEMINI_API_KEY is not set in PartyKit secrets.");
-      conn.close(1011, "AI service is not configured.");
+    const url = new URL(request.url);
+    const agentId = url.searchParams.get("agentId");
+    
+    console.log(`[DurableObject] Twilio connected. AgentID: ${agentId}`);
+
+    if (!agentId) {
+      console.error("[DurableObject] Error: agentId is missing.");
+      ws.close(1002, "Agent ID is required.");
       return;
     }
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY as string });
 
-    // 2. Connect to Google AI Live Session
+    if (!this.env.GEMINI_API_KEY) {
+      console.error("[DurableObject] Error: GEMINI_API_KEY is not set.");
+      ws.close(1011, "AI service is not configured.");
+      return;
+    }
+
+    const ai = new GoogleGenAI({ apiKey: this.env.GEMINI_API_KEY });
+
+    // Configurar listeners del WebSocket de Twilio
+    ws.addEventListener("message", async (event) => {
+      if (!this.googleAISession) return;
+
+      try {
+        const messageStr = event.data as string;
+        const twilioMessage = JSON.parse(messageStr);
+
+        if (twilioMessage.event === "media") {
+          const audioPayload = twilioMessage.media.payload;
+          this.googleAISession.sendRealtimeInput({
+            media: {
+              data: audioPayload,
+              mimeType: "audio/pcm;rate=8000"
+            }
+          });
+        } else if (twilioMessage.event === 'stop') {
+          console.log('[DurableObject] Twilio stream stopped.');
+          this.googleAISession?.close();
+        }
+      } catch (err) {
+        console.error("Error parsing Twilio message:", err);
+      }
+    });
+
+    ws.addEventListener("close", () => {
+        console.log("[DurableObject] Twilio disconnected");
+        if (this.googleAISession) {
+            this.googleAISession.close();
+            this.googleAISession = null;
+        }
+    });
+
+    // Conectar a Google AI
     try {
       this.googleAISession = (await ai.live.connect({
         model: "gemini-2.5-flash-native-audio-preview-09-2025",
@@ -43,83 +104,58 @@ export default class CallServer implements Party.Server {
         },
         callbacks: {
           onopen: () => {
-            console.log("[PartyKit] Google AI session opened.");
+            console.log("[DurableObject] Google AI session opened.");
+            // Iniciar conversación
+             this.googleAISession?.sendRealtimeInput({ text: "start" });
           },
           onmessage: (message) => {
-            // Forward AI's audio response back to Twilio
             const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (audioData) {
               const twilioMessage = {
                 event: "media",
-                streamSid: this.room.id, 
+                streamSid: "stream-placeholder", // Se actualizará si guardas el streamSid
                 media: {
                   payload: audioData,
                 },
               };
-              conn.send(JSON.stringify(twilioMessage));
+              // Necesitamos que el WebSocket esté abierto para enviar
+              if(ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify(twilioMessage));
+              }
             }
           },
           onerror: (e) => {
-            console.error("[PartyKit] Google AI Error:", e);
-            conn.close(1011, "An AI service error occurred.");
+            console.error("[DurableObject] Google AI Error:", e);
+            ws.close(1011, "An AI service error occurred.");
           },
           onclose: () => {
-            console.log("[PartyKit] Google AI session closed.");
-            if (conn.readyState === WebSocket.OPEN) {
-              conn.close(1000, "AI session ended.");
+            console.log("[DurableObject] Google AI session closed.");
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.close(1000, "AI session ended.");
             }
           },
         },
       })) as MinimalLiveSession;
     } catch (error) {
-      console.error("[PartyKit] Failed to connect to Google AI:", error);
-      conn.close(1011, "Could not connect to AI service.");
+      console.error("[DurableObject] Failed to connect to Google AI:", error);
+      ws.close(1011, "Could not connect to AI service.");
       return;
-    }
-    
-     // Programmatically start the conversation after setup
-    this.googleAISession.sendRealtimeInput({ text: "start" });
-  }
-
-  onMessage(message: string, sender: Party.Connection) {
-    if (!this.googleAISession) {
-      console.warn("[PartyKit] Received message from Twilio, but no active Google AI session.");
-      return;
-    }
-    
-    // Forward Twilio's audio to Google AI
-    const twilioMessage = JSON.parse(message);
-    if (twilioMessage.event === "media") {
-      const audioPayload = twilioMessage.media.payload;
-       this.googleAISession.sendRealtimeInput({
-        media: {
-            data: audioPayload,
-            mimeType: "audio/pcm;rate=8000" // Twilio uses PCMU (G.711 μ-law) which is 8000 Hz
-        }
-       });
-    } else if (twilioMessage.event === 'stop') {
-        console.log('[PartyKit] Twilio stream stopped.');
-        this.googleAISession?.close();
-    }
-  }
-
-  onClose(conn: Party.Connection) {
-    console.log(`[PartyKit] Twilio disconnected: ${conn.id}`);
-    if (this.googleAISession) {
-      this.googleAISession.close();
-      this.googleAISession = null;
-    }
-  }
-
-  onError(conn: Party.Connection, err: Error) {
-    console.error(`[PartyKit] Twilio connection error for ${conn.id}:`, err);
-    if (this.googleAISession) {
-      this.googleAISession.close();
-      this.googleAISession = null;
     }
   }
 }
 
-CallServer satisfies Party.Worker;
+// 2. EL ROUTER (El "Recepcionista" Stateless)
+// Esto es lo que soluciona el error "stateless".
+export default {
+  async fetch(request: Request, env: any) {
+    const url = new URL(request.url);
+    
+    // Usamos una ID fija o basada en la URL para crear la instancia del Durable Object.
+    // "default-room" asegura que siempre vayamos a una sala válida para probar.
+    const id = env.PARTYKIT_DURABLE.idFromName("twilio-default-room");
+    const stub = env.PARTYKIT_DURABLE.get(id);
 
-export class PartyKitDurable extends CallServer {}
+    // Pasamos la petición al Durable Object
+    return stub.fetch(request);
+  }
+};
