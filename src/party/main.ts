@@ -121,3 +121,5 @@ export default class CallServer implements Party.Server {
 }
 
 CallServer satisfies Party.Worker;
+
+export class PartyKitDurable extends CallServer {}
