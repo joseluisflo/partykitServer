@@ -1,4 +1,4 @@
-name = "agentverse-calls"
+name = "partykit"
 main = "src/party/main.ts"
 compatibility_date = "2024-07-25"
 
