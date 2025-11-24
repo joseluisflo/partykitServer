@@ -24,4 +24,7 @@ jobs:
       - name: Deploy to PartyKit
         run: bun run deploy
         env:
+          # Es CRUCIAL que estas líneas estén aquí para que el código lea los secretos
           PARTYKIT_TOKEN: ${{ secrets.PARTYKIT_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
