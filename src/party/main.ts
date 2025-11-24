@@ -1,3 +1,4 @@
+
 import { GoogleGenAI, type LiveSession, Modality } from "@google/genai";
 
 // Definimos la interfaz del Entorno (Variables)
