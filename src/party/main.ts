@@ -1,14 +1,54 @@
+
 import type * as Party from "partykit/server";
 import { GoogleGenAI, type LiveSession, Modality } from "@google/genai";
+import * as admin from 'firebase-admin';
 
-// The LiveSession type from Google's SDK is not fully exported,
-// so we define a minimal interface to satisfy TypeScript.
+// Define minimal interfaces to satisfy TypeScript
+interface Agent {
+  instructions?: string;
+  inCallWelcomeMessage?: string;
+  agentVoice?: string;
+  textSources?: { title: string; content: string }[];
+  fileSources?: { name: string; extractedText?: string }[];
+}
+
 interface MinimalLiveSession extends LiveSession {
   close(): void;
   sendRealtimeInput(request: { media: { data: string; mimeType: string; } } | { text: string }): void;
 }
 
-export class PartyKitDurable implements Party.Server {
+// Helper to initialize Firebase Admin
+function initializeFirebaseAdmin(serviceAccount: admin.ServiceAccount) {
+  if (admin.apps.length > 0) {
+    return admin.app();
+  }
+  return admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
+
+// Function to fetch agent configuration from Firestore
+async function getAgentConfig(firestore: admin.firestore.Firestore, agentId: string): Promise<Agent | null> {
+    const agentQuerySnapshot = await firestore.collectionGroup('agents').where('__name__', '==', agentId).limit(1).get();
+
+    if (agentQuerySnapshot.empty) {
+        console.error(`[PartyKit] Agent with ID ${agentId} not found.`);
+        return null;
+    }
+    const agentDoc = agentQuerySnapshot.docs[0];
+    const agent = agentDoc.data() as Agent;
+    const agentRef = agentDoc.ref;
+
+    const textsSnapshot = await agentRef.collection('texts').get();
+    const filesSnapshot = await agentRef.collection('files').get();
+
+    agent.textSources = textsSnapshot.docs.map(doc => doc.data() as { title: string; content: string });
+    agent.fileSources = filesSnapshot.docs.map(doc => doc.data() as { name: string; extractedText?: string });
+
+    return agent;
+}
+
+export default class PartyKitDurable implements Party.Server {
   googleAISession: MinimalLiveSession | null = null;
   ws: WebSocket | null = null;
 
@@ -19,19 +59,57 @@ export class PartyKitDurable implements Party.Server {
     console.log(`[PartyKit] Connection received for room: ${this.room.id}`);
 
     const url = new URL(ctx.request.url);
-    
-    // Configuration is now passed via query parameters
-    const systemInstruction = url.searchParams.get("systemInstruction");
-    const agentVoice = url.searchParams.get("agentVoice") || 'Zephyr';
+    const agentId = url.searchParams.get("agentId");
 
-    if (!systemInstruction) {
-      console.error("[PartyKit] Error: systemInstruction is missing from query parameters.");
-      this.ws.close(1002, "System instruction is required.");
+    if (!agentId) {
+      console.error("[PartyKit] Error: agentId is missing from query parameters.");
+      this.ws.close(1002, "Agent ID is required.");
       return;
     }
+    console.log(`[PartyKit] agentId found: ${agentId}`);
 
+    // --- Firebase & Agent Config ---
+    let agentConfig: Agent | null = null;
+    try {
+        const serviceAccountJson = JSON.parse(this.room.env.FIREBASE_SERVICE_ACCOUNT as string);
+        const firestore = initializeFirebaseAdmin(serviceAccountJson).firestore();
+        agentConfig = await getAgentConfig(firestore, agentId);
+    } catch (e) {
+        console.error('[PartyKit] Firebase initialization or data fetch failed:', e);
+        this.ws.close(1011, 'Failed to retrieve agent configuration.');
+        return;
+    }
+
+    if (!agentConfig) {
+        this.ws.close(1011, `Agent configuration for ${agentId} not found.`);
+        return;
+    }
+    
+    const knowledge = [
+        ...(agentConfig.textSources || []).map(t => `Title: ${t.title}\\nContent: ${t.content}`),
+        ...(agentConfig.fileSources || []).map(f => `File: ${f.name}\\nContent: ${f.extractedText || ''}`)
+    ].join('\\n\\n---\\n\\n');
+
+    const systemInstruction = `
+You are a voice AI. Your goal is to be as responsive as possible. Your first response to a user MUST be an immediate, short acknowledgment like "Of course, let me check that" or "Sure, one moment". Then, you will provide the full answer.
+This is a real-time conversation. Keep all your answers concise and to the point. Prioritize speed. Do not use filler phrases.
+${agentConfig.inCallWelcomeMessage ? `Your very first response in this conversation must be: "${agentConfig.inCallWelcomeMessage}"` : ''}
+
+Your instructions and persona are defined below.
+
+### Instructions & Persona
+${agentConfig.instructions || 'You are a helpful assistant.'}
+        
+### Knowledge Base
+Use the following information to answer questions. This is your primary source of truth.
+---
+${knowledge}
+---
+    `;
+
+    // --- Google AI Connection ---
     if (!this.room.env.GEMINI_API_KEY) {
-      console.error("[PartyKit] Error: GEMINI_API_KEY is not set in PartyKit secrets.");
+      console.error("[PartyKit] Error: GEMINI_API_KEY is not set.");
       this.ws.close(1011, "AI service is not configured.");
       return;
     }
@@ -46,14 +124,13 @@ export class PartyKitDurable implements Party.Server {
           inputAudioTranscription: { interruptions: true },
           outputAudioTranscription: {},
           speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: agentVoice } },
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: agentConfig.agentVoice || 'Zephyr' } },
           },
-          systemInstruction: decodeURIComponent(systemInstruction), // Decode the instruction
+          systemInstruction: systemInstruction,
         },
         callbacks: {
           onopen: () => {
             console.log("[PartyKit] Google AI session opened.");
-            // Programmatically start the conversation
             this.googleAISession?.sendRealtimeInput({ text: "start" });
           },
           onmessage: (message) => {
@@ -73,9 +150,7 @@ export class PartyKitDurable implements Party.Server {
           },
           onclose: () => {
             console.log("[PartyKit] Google AI session closed.");
-            if (this.ws && this.ws.readyState === 1) { // WebSocket.OPEN
-                this.ws.close(1000, "AI session ended.");
-            }
+            this.onClose();
           },
         },
       })) as MinimalLiveSession;
@@ -111,29 +186,8 @@ export class PartyKitDurable implements Party.Server {
       this.googleAISession.close();
       this.googleAISession = null;
     }
-  }
-}
-
-// Entrypoint for the PartyKit router
-export default class MainServer implements Party.Server {
-  constructor(readonly room: Party.Room) {}
-
-  async onConnect(conn: Party.Connection, ctx: Party.ConnectionContext) {
-    const url = new URL(ctx.request.url);
-    const pathParts = url.pathname.split("/").filter(p => p);
-    
-    const roomName = pathParts.find(part => part.startsWith("CA"));
-    
-    if (!roomName) {
-      console.error("[Router] Could not find Call SID in path. Closing connection.");
-      conn.close(1002, "Invalid URL format. Call SID is missing.");
-      return;
+     if (this.ws && this.ws.readyState === 1) { // WebSocket.OPEN
+        this.ws.close(1000, "Closing connection.");
     }
-    
-    const durableObjectId = this.room.context.parties.main.idFromName(roomName);
-    const durableObjectStub = this.room.context.parties.main.get(durableObjectId);
-    
-    // Forward the connection to the Durable Object
-    return durableObjectStub.fetch(ctx.request);
   }
 }
