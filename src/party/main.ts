@@ -115,3 +115,5 @@ export default class PartyKitDurable implements Party.Server {
 
 // This export is required for Wrangler to correctly identify the Durable Object class.
 PartyKitDurable satisfies Party.Worker;
+
+export { PartyKitDurable };
