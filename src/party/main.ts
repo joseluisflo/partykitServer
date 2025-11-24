@@ -162,6 +162,12 @@ export class PartyKitDurable implements DurableObject {
             console.log("[GOOGLE] ✅ Connected!");
             this.isGoogleAIConnected = true;
             
+            // CRÍTICO: Enviar mensaje inicial para activar la voz
+            console.log("[GOOGLE] Sending welcome message...");
+            this.googleAISession?.sendRealtimeInput({ 
+              text: "Please greet the caller warmly and ask how you can help them today." 
+            });
+            
             console.log(`[GOOGLE] Processing ${this.pendingAudioQueue.length} queued audio chunks`);
             while (this.pendingAudioQueue.length > 0) {
               const payload = this.pendingAudioQueue.shift();
