@@ -1,0 +1,20 @@
+name = "partykit"  # Coincide con el nombre en tu captura
+main = "src/index.ts"
+compatibility_date = "2025-11-24"
+
+# Habilitamos compatibilidad con Node.js (necesario para algunas libs)
+compatibility_flags = ["nodejs_compat"]
+
+# Configuración del Durable Object (DO)
+# Esto conecta tu Worker con la clase que maneja el estado
+[[durable_objects.bindings]]
+name = "PARTYKIT_DURABLE"   # Coincide con el binding en tu captura
+class_name = "PartyKitDurable" # Este es el nombre de la clase en tu código TypeScript
+
+[[migrations]]
+tag = "v1"
+new_classes = ["PartyKitDurable"]
+
+[vars]
+# Aquí irán tus variables públicas si las tienes.
+# Las secretas (como GEMINI_API_KEY) siguen en el dashboard o .dev.vars
