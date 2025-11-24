@@ -8,7 +8,7 @@ interface Env {
 
 interface MinimalLiveSession extends LiveSession {
   close(): void;
-  sendRealtimeInput(request: { media: { data: string; mimeType: string; } } | { text: string }): void;
+  sendRealtimeInput(request: { audio: { data: string; mimeType: string; } } | { text: string }): void;
 }
 
 // Tabla de conversión Mu-Law a Linear PCM16
@@ -33,14 +33,14 @@ function muLawToLinear16(muLawBuffer: Buffer): Buffer {
   return Buffer.from(output.buffer);
 }
 
-// Upsample de 8kHz a 16kHz para Google
+// Upsample de 8kHz a 16kHz
 function upsampleTo16k(pcm8k: Buffer): Buffer {
   const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, pcm8k.length / 2);
   const samples16k = new Int16Array(samples8k.length * 2);
   
   for (let i = 0; i < samples8k.length; i++) {
     samples16k[i * 2] = samples8k[i];
-    samples16k[i * 2 + 1] = samples8k[i]; // Simple duplicación
+    samples16k[i * 2 + 1] = samples8k[i];
   }
   
   return Buffer.from(samples16k.buffer);
@@ -118,25 +118,19 @@ export class PartyKitDurable implements DurableObject {
     }
   }
 
-  // CONVERSIÓN CORRECTA: Mu-Law 8kHz → PCM16 16kHz
+  // CORRECCIÓN CRÍTICA: Usar "audio" no "media"
   sendAudioToGoogle(base64Payload: string) {
     try {
-        // 1. Decodificar Mu-Law de Twilio
         const muLawBuffer = Buffer.from(base64Payload, 'base64');
-        
-        // 2. Convertir Mu-Law → Linear PCM16 (8kHz)
         const pcm8kBuffer = muLawToLinear16(muLawBuffer);
-        
-        // 3. Upsample 8kHz → 16kHz (Google prefiere 16kHz o 24kHz)
         const pcm16kBuffer = upsampleTo16k(pcm8kBuffer);
-        
-        // 4. Enviar a Google
         const pcmBase64 = pcm16kBuffer.toString('base64');
         
+        // ✅ CORRECCIÓN: "audio" no "media"
         this.googleAISession?.sendRealtimeInput({
-            media: {
+            audio: {  // ← Cambio crítico aquí
               data: pcmBase64,
-              mimeType: "audio/pcm;rate=16000" // ✅ CORRECTO
+              mimeType: "audio/pcm;rate=16000"
             }
         });
     } catch (err) {
@@ -175,41 +169,37 @@ export class PartyKitDurable implements DurableObject {
             }
           },
           onmessage: (message) => {
-            const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            // CORRECCIÓN CRÍTICA: El audio viene en message.data según docs oficiales
+            console.log("[GOOGLE] Message received, type:", message.type || 'unknown');
             
-            if (audioData) {
-                console.log(`[GOOGLE→TWILIO] Audio chunk: ${audioData.length} chars`);
-                
-                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                    try {
-                        // Google devuelve PCM 24kHz, convertir a Mu-Law 8kHz
-                        const pcm24kBuffer = Buffer.from(audioData, 'base64');
-                        const pcm8kBuffer = downsampleBuffer(pcm24kBuffer, 24000, 8000);
-                        const muLawBuffer = linear16ToMuLaw(pcm8kBuffer);
-                        const muLawBase64 = muLawBuffer.toString('base64');
-
-                        this.ws.send(JSON.stringify({
-                            event: "media",
-                            streamSid: this.twilioStreamSid,
-                            media: { payload: muLawBase64 },
-                        }));
-                        
-                        console.log(`[TWILIO] Sent ${muLawBase64.length} chars`);
-                    } catch (err) {
-                        console.error("[ERROR] Processing Google audio:", err);
+            // Opción 1: Audio directo en message.data
+            if (message.data) {
+                console.log(`[GOOGLE→TWILIO] Audio in message.data: ${message.data.length} chars`);
+                this.sendAudioToTwilio(message.data);
+            }
+            
+            // Opción 2: Audio en la estructura serverContent (tu implementación original)
+            else if (message.serverContent?.modelTurn?.parts) {
+                for (const part of message.serverContent.modelTurn.parts) {
+                    if (part.inlineData?.data) {
+                        console.log(`[GOOGLE→TWILIO] Audio in parts: ${part.inlineData.data.length} chars`);
+                        this.sendAudioToTwilio(part.inlineData.data);
                     }
                 }
-            } else if (message.serverContent?.turnComplete) {
+            }
+            
+            // Log para debug si no encontramos audio
+            else if (message.serverContent?.turnComplete) {
                 console.log("[GOOGLE] Turn complete");
+            } else {
+                const preview = JSON.stringify(message).substring(0, 200);
+                console.log("[GOOGLE] Other message:", preview);
             }
           },
           onerror: (e) => {
-            // Mejor logging del error
             console.error("[GOOGLE] Error:", e);
             if (e instanceof Error) {
-              console.error("[GOOGLE] Error details:", e.message, e.stack);
-            } else if (e && typeof e === 'object') {
-              console.error("[GOOGLE] Error object:", JSON.stringify(e, null, 2));
+              console.error("[GOOGLE] Error details:", e.message);
             }
           },
           onclose: () => {
@@ -224,6 +214,32 @@ export class PartyKitDurable implements DurableObject {
       if (error instanceof Error) {
         console.error("[ERROR] Details:", error.message, error.stack);
       }
+    }
+  }
+
+  // Nueva función separada para enviar audio a Twilio
+  sendAudioToTwilio(audioData: string) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      console.error("[TWILIO] WebSocket not ready");
+      return;
+    }
+
+    try {
+        // Google devuelve PCM 24kHz, convertir a Mu-Law 8kHz
+        const pcm24kBuffer = Buffer.from(audioData, 'base64');
+        const pcm8kBuffer = downsampleBuffer(pcm24kBuffer, 24000, 8000);
+        const muLawBuffer = linear16ToMuLaw(pcm8kBuffer);
+        const muLawBase64 = muLawBuffer.toString('base64');
+
+        this.ws.send(JSON.stringify({
+            event: "media",
+            streamSid: this.twilioStreamSid,
+            media: { payload: muLawBase64 },
+        }));
+        
+        console.log(`[TWILIO] ✅ Sent ${muLawBase64.length} chars`);
+    } catch (err) {
+        console.error("[ERROR] Processing Google audio:", err);
     }
   }
 
