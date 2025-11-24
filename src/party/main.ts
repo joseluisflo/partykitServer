@@ -145,6 +145,10 @@ export class PartyKitDurable implements DurableObject {
     }
       
     console.log('[GOOGLE] Connecting to AI...');
+    console.log('[GOOGLE] API Key present:', this.env.GEMINI_API_KEY ? 'YES' : 'NO');
+    console.log('[GOOGLE] Model: gemini-2.5-flash-native-audio-preview-09-2025');
+    console.log('[GOOGLE] Voice:', agentVoice);
+    
     const ai = new GoogleGenAI({ apiKey: this.env.GEMINI_API_KEY });
 
     try {
@@ -175,8 +179,18 @@ export class PartyKitDurable implements DurableObject {
             }
           },
           onmessage: (message) => {
-            // CORRECCIÓN CRÍTICA: El audio viene en message.data según docs oficiales
-            console.log("[GOOGLE] Message received, type:", message.type || 'unknown');
+            // LOGGING EXHAUSTIVO
+            console.log("[GOOGLE] 🔔 Message received!");
+            console.log("[GOOGLE] Message type:", typeof message);
+            console.log("[GOOGLE] Message keys:", Object.keys(message));
+            
+            // Intentar stringify para ver la estructura completa
+            try {
+              const preview = JSON.stringify(message, null, 2).substring(0, 500);
+              console.log("[GOOGLE] Message preview:", preview);
+            } catch (e) {
+              console.log("[GOOGLE] Could not stringify message");
+            }
             
             // Opción 1: Audio directo en message.data
             if (message.data) {
@@ -184,8 +198,9 @@ export class PartyKitDurable implements DurableObject {
                 this.sendAudioToTwilio(message.data);
             }
             
-            // Opción 2: Audio en la estructura serverContent (tu implementación original)
+            // Opción 2: Audio en la estructura serverContent
             else if (message.serverContent?.modelTurn?.parts) {
+                console.log("[GOOGLE] Found serverContent.modelTurn.parts");
                 for (const part of message.serverContent.modelTurn.parts) {
                     if (part.inlineData?.data) {
                         console.log(`[GOOGLE→TWILIO] Audio in parts: ${part.inlineData.data.length} chars`);
@@ -194,12 +209,14 @@ export class PartyKitDurable implements DurableObject {
                 }
             }
             
-            // Log para debug si no encontramos audio
+            // Opción 3: turnComplete
             else if (message.serverContent?.turnComplete) {
                 console.log("[GOOGLE] Turn complete");
-            } else {
-                const preview = JSON.stringify(message).substring(0, 200);
-                console.log("[GOOGLE] Other message:", preview);
+            }
+            
+            // Si llegamos aquí, el mensaje no tiene audio
+            else {
+                console.log("[GOOGLE] ⚠️ Message received but no audio data found");
             }
           },
           onerror: (e) => {
