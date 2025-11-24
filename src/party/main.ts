@@ -1,6 +1,6 @@
 
 import { GoogleGenAI, type LiveSession, Modality } from "@google/genai";
-import { downsampleBuffer, linear16ToMuLaw } from "./audioUtils";
+import { downsampleBuffer, linear16ToMuLaw } from "../audioUtils";
 
 // Definimos la interfaz del Entorno (Variables)
 interface Env {
@@ -167,11 +167,6 @@ export class PartyKitDurable implements DurableObject {
                     streamSid: this.twilioStreamSid,
                     media: {
                         payload: muLawBase64,
-                        format: {
-                            encoding: "mulaw",
-                            sampleRate: 8000,
-                            channels: 1,
-                        },
                     },
                 };
               this.ws.send(JSON.stringify(twilioResponse));
