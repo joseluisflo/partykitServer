@@ -22,8 +22,12 @@ jobs:
         run: bun install
 
       - name: Deploy to PartyKit
-        run: npx partykit deploy --token=$PARTYKIT_TOKEN
+        # Ejecutamos directamente npx partykit deploy (sin flags raros)
+        # Pero nos aseguramos de que el entorno tenga el token
+        run: npx partykit deploy
         env:
           PARTYKIT_TOKEN: ${{ secrets.PARTYKIT_TOKEN }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Agregamos esta línea para asegurarnos de que no sea interactivo
+          CI: true
