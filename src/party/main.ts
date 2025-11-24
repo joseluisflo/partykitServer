@@ -1,5 +1,6 @@
 
 import { GoogleGenAI, type LiveSession, Modality } from "@google/genai";
+import { downsampleBuffer, linear16ToMuLaw } from "./audioUtils";
 
 // Definimos la interfaz del Entorno (Variables)
 interface Env {
@@ -148,11 +149,31 @@ export class PartyKitDurable implements DurableObject {
           onmessage: (message) => {
             const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (audioData && this.ws && this.ws.readyState === WebSocket.OPEN) {
-              const twilioResponse = {
-                event: "media",
-                streamSid: this.twilioStreamSid,
-                media: { payload: audioData },
-              };
+                
+                // 1. Decode from Base64 to raw PCM 16-bit
+                const pcm16Data = Buffer.from(audioData, 'base64');
+                
+                // 2. Downsample from 24kHz to 8kHz
+                const pcm8kData = downsampleBuffer(pcm16Data, 24000, 8000);
+                
+                // 3. Transcode from 16-bit linear PCM to 8-bit µ-law
+                const muLawData = linear16ToMuLaw(pcm8kData);
+
+                // 4. Encode back to Base64
+                const muLawBase64 = Buffer.from(muLawData).toString('base64');
+
+                const twilioResponse = {
+                    event: "media",
+                    streamSid: this.twilioStreamSid,
+                    media: {
+                        payload: muLawBase64,
+                        format: {
+                            encoding: "mulaw",
+                            sampleRate: 8000,
+                            channels: 1,
+                        },
+                    },
+                };
               this.ws.send(JSON.stringify(twilioResponse));
             }
           },
