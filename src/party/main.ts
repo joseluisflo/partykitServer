@@ -51,6 +51,7 @@ export default class PartyKitDurable implements Party.Server {
         callbacks: {
           onopen: () => {
             console.log("[PartyKit Worker] Google AI session opened.");
+            // Programmatically start the conversation
             this.googleAISession?.sendRealtimeInput({ text: "start" });
           },
           onmessage: (message) => {
@@ -111,3 +112,6 @@ export default class PartyKitDurable implements Party.Server {
     }
   }
 }
+
+// This export is required for Wrangler to correctly identify the Durable Object class.
+PartyKitDurable satisfies Party.Worker;
