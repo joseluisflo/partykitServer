@@ -13,11 +13,6 @@ class_name = "PartyKitDurable"
 tag = "v1"
 new_classes = ["PartyKitDurable"]
 
-# The secrets are no longer needed here as Firebase logic is removed
-# [secrets]
-# FIREBASE_SERVICE_ACCOUNT = "FIREBASE_SERVICE_ACCOUNT"
-# GEMINI_API_KEY = "GEMINI_API_KEY"
-
 # This rule is essential for routing WebSocket requests to the Durable Object
 [[rules]]
 type = "ESModule"
