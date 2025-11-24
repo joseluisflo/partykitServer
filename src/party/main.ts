@@ -103,11 +103,13 @@ export class PartyKitDurable implements DurableObject {
         await this.connectToGoogleAI(systemInstruction, agentVoice);
       } 
       else if (twilioMessage.event === 'media') {
-        if (this.isGoogleAIConnected && this.googleAISession) {
-            this.sendAudioToGoogle(twilioMessage.media.payload);
-        } else {
-            this.pendingAudioQueue.push(twilioMessage.media.payload);
-        }
+        // TEMPORAL: Deshabilitar envío de audio del usuario
+        console.log("[TWILIO] Skipping audio chunk (test mode)");
+        // if (this.isGoogleAIConnected && this.googleAISession) {
+        //     this.sendAudioToGoogle(twilioMessage.media.payload);
+        // } else {
+        //     this.pendingAudioQueue.push(twilioMessage.media.payload);
+        // }
       } 
       else if (twilioMessage.event === 'stop') {
         console.log('[STOP] Call ended.');
@@ -166,17 +168,18 @@ export class PartyKitDurable implements DurableObject {
             console.log("[GOOGLE] ✅ Connected!");
             this.isGoogleAIConnected = true;
             
-            // CRÍTICO: Enviar mensaje inicial para activar la voz
-            console.log("[GOOGLE] Sending welcome message...");
+            // PRUEBA: Solo texto, SIN audio del usuario
+            console.log("[GOOGLE] Sending welcome message (TEXT ONLY TEST)...");
             this.googleAISession?.sendRealtimeInput({ 
-              text: "Please greet the caller warmly and ask how you can help them today." 
+              text: "Say hello in audio format. Just say 'Hello, how can I help you today?' and nothing else." 
             });
             
-            console.log(`[GOOGLE] Processing ${this.pendingAudioQueue.length} queued audio chunks`);
-            while (this.pendingAudioQueue.length > 0) {
-              const payload = this.pendingAudioQueue.shift();
-              if (payload) this.sendAudioToGoogle(payload);
-            }
+            // TEMPORAL: NO procesar audio del usuario
+            console.log(`[GOOGLE] Skipping ${this.pendingAudioQueue.length} audio chunks for test`);
+            // while (this.pendingAudioQueue.length > 0) {
+            //   const payload = this.pendingAudioQueue.shift();
+            //   if (payload) this.sendAudioToGoogle(payload);
+            // }
           },
           onmessage: (message) => {
             // LOGGING EXHAUSTIVO
