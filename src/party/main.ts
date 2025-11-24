@@ -6,7 +6,7 @@ interface Env {
   PARTYKIT_DURABLE: DurableObjectNamespace;
 }
 
-// Definimos interfaces mínimas para la sesión de Google (igual que antes)
+// Definimos interfaces mínimas para la sesión de Google
 interface MinimalLiveSession extends LiveSession {
   close(): void;
   sendRealtimeInput(request: { media: { data: string; mimeType: string; } } | { text: string }): void;
@@ -17,6 +17,11 @@ export class PartyKitDurable implements DurableObject {
   env: Env;
   googleAISession: MinimalLiveSession | null = null;
   ws: WebSocket | null = null;
+  
+  // Variables para guardar configuración temporal hasta que conectemos
+  pendingSystemInstruction: string | null = null;
+  agentVoice: string = 'Zephyr';
+  streamSid: string | null = null;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -24,22 +29,18 @@ export class PartyKitDurable implements DurableObject {
   }
 
   // -----------------------------------------------------------------------
-  // 1. EL "PORTERO": Método fetch (Reemplaza a la lógica automática de PartyKit)
+  // 1. EL "PORTERO": Método fetch
   // -----------------------------------------------------------------------
   async fetch(request: Request): Promise<Response> {
-    // Verificamos que sea una petición de WebSocket (Handshake)
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Expected Upgrade: websocket", { status: 426 });
     }
 
-    // Creamos el par de WebSockets (Uno para el cliente/Twilio, otro para el servidor/Worker)
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // Aceptamos la conexión en el lado del servidor
     this.handleConnection(server, request);
 
-    // Devolvemos la conexión al cliente (Twilio) con estado 101 (Switching Protocols)
     return new Response(null, {
       status: 101,
       webSocket: client,
@@ -47,35 +48,25 @@ export class PartyKitDurable implements DurableObject {
   }
 
   // -----------------------------------------------------------------------
-  // 2. LÓGICA DE CONEXIÓN (Lo que antes tenías en onConnect)
+  // 2. LÓGICA DE CONEXIÓN INICIAL
   // -----------------------------------------------------------------------
   async handleConnection(webSocket: WebSocket, request: Request) {
-    // Aceptamos el socket explícitamente (Requisito nativo)
     webSocket.accept();
     this.ws = webSocket;
     console.log(`[Native Worker] Conexión WebSocket aceptada.`);
 
+    // Ya NO buscamos systemInstruction en la URL.
+    // Solo recuperamos configuración ligera si existe.
     const url = new URL(request.url);
-    const systemInstruction = url.searchParams.get("systemInstruction");
-    const agentVoice = url.searchParams.get("agentVoice") || 'Zephyr';
+    this.agentVoice = url.searchParams.get("agentVoice") || 'Zephyr';
 
-    // Validación de parámetros
-    if (!systemInstruction) {
-      console.error("[Native Worker] Error: systemInstruction is missing.");
-      this.ws.close(1002, "Agent instruction is required.");
-      return;
-    }
-
-    // Validación de API Key
     if (!this.env.GEMINI_API_KEY) {
       console.error("[Native Worker] Error: GEMINI_API_KEY is not set.");
       this.ws.close(1011, "AI service is not configured.");
       return;
     }
 
-    // Configuración de listeners del WebSocket (Twilio -> Worker)
     this.ws.addEventListener("message", (event) => {
-      // Convertimos el dato a string porque Twilio manda JSON texto
       this.onMessage(event.data as string);
     });
 
@@ -87,8 +78,61 @@ export class PartyKitDurable implements DurableObject {
       console.error("[Native Worker] WebSocket error:", err);
       this.onClose();
     });
+  }
 
-    // Conexión a Google Gemini
+  // -----------------------------------------------------------------------
+  // 3. PROCESAMIENTO DE MENSAJES (Twilio -> Worker)
+  // -----------------------------------------------------------------------
+  async onMessage(message: string) {
+    try {
+      const twilioMessage = JSON.parse(message);
+
+      // --- EVENTO START: Aquí recibimos los parámetros personalizados ---
+      if (twilioMessage.event === "start") {
+        console.log("[Native Worker] Recibido evento start de Twilio.");
+        this.streamSid = twilioMessage.start.streamSid;
+        
+        const customParams = twilioMessage.start.customParameters;
+
+        if (customParams && customParams.systemInstruction) {
+            console.log("[Native Worker] Instrucción del sistema recibida correctamente.");
+            this.pendingSystemInstruction = customParams.systemInstruction;
+            
+            // AHORA que tenemos la instrucción, conectamos a Google AI
+            await this.connectToGoogleAI();
+        } else {
+            console.warn("[Native Worker] ADVERTENCIA: No se recibió systemInstruction en customParameters.");
+            // Podrías poner un fallback aquí si quieres
+            this.ws?.close(1002, "Missing systemInstruction");
+        }
+      } 
+      // --- EVENTO MEDIA: Audio del usuario ---
+      else if (twilioMessage.event === "media") {
+        if (this.googleAISession) {
+          this.googleAISession.sendRealtimeInput({
+            media: {
+              data: twilioMessage.media.payload,
+              mimeType: "audio/pcm;rate=8000"
+            }
+          });
+        }
+      } 
+      // --- EVENTO STOP ---
+      else if (twilioMessage.event === 'stop') {
+        console.log('[Native Worker] Twilio stream stop message received.');
+        this.onClose();
+      }
+    } catch (e) {
+      console.error("[Native Worker] Error parsing message from Twilio", e);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // 4. CONEXIÓN A GOOGLE AI (Se llama solo tras recibir el evento 'start')
+  // -----------------------------------------------------------------------
+  async connectToGoogleAI() {
+    if (!this.pendingSystemInstruction) return;
+
     const ai = new GoogleGenAI({ apiKey: this.env.GEMINI_API_KEY });
 
     try {
@@ -99,23 +143,22 @@ export class PartyKitDurable implements DurableObject {
           inputAudioTranscription: { interruptions: true },
           outputAudioTranscription: {},
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: agentVoice } },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: this.agentVoice } },
           },
-          systemInstruction: decodeURIComponent(systemInstruction),
+          // Aquí usamos la instrucción que sacamos del parámetro de Twilio
+          systemInstruction: this.pendingSystemInstruction, 
         },
         callbacks: {
           onopen: () => {
             console.log("[Native Worker] Google AI session opened.");
-            // Iniciamos la conversación
             this.googleAISession?.sendRealtimeInput({ text: "start" });
           },
           onmessage: (message) => {
-            // Worker -> Twilio
             const audioData = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (audioData && this.ws && this.ws.readyState === WebSocket.OPEN) {
               const twilioMessage = {
                 event: "media",
-                streamSid: "stream-id-placeholder", // Twilio a veces necesita esto, pero en streaming broadcast suele funcionar sin ID específico
+                streamSid: this.streamSid,
                 media: { payload: audioData },
               };
               this.ws.send(JSON.stringify(twilioMessage));
@@ -143,31 +186,7 @@ export class PartyKitDurable implements DurableObject {
   }
 
   // -----------------------------------------------------------------------
-  // 3. PROCESAMIENTO DE MENSAJES (Twilio -> Worker -> AI)
-  // -----------------------------------------------------------------------
-  onMessage(message: string) {
-    if (!this.googleAISession) return;
-    try {
-      const twilioMessage = JSON.parse(message);
-      
-      if (twilioMessage.event === "media") {
-        this.googleAISession.sendRealtimeInput({
-          media: {
-            data: twilioMessage.media.payload,
-            mimeType: "audio/pcm;rate=8000"
-          }
-        });
-      } else if (twilioMessage.event === 'stop') {
-        console.log('[Native Worker] Twilio stream stop message received.');
-        this.onClose();
-      }
-    } catch (e) {
-      console.error("[Native Worker] Error parsing message from Twilio", e);
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // 4. LIMPIEZA
+  // 5. LIMPIEZA
   // -----------------------------------------------------------------------
   onClose() {
     console.log("[Native Worker] Connection closing.");
@@ -175,7 +194,6 @@ export class PartyKitDurable implements DurableObject {
       this.googleAISession.close();
       this.googleAISession = null;
     }
-    // Asegurarse de cerrar el socket si sigue abierto
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.close(1000, "Closing connection.");
     }
