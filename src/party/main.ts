@@ -11,6 +11,41 @@ interface MinimalLiveSession extends LiveSession {
   sendRealtimeInput(request: { media: { data: string; mimeType: string; } } | { text: string }): void;
 }
 
+// Tabla de conversión Mu-Law a Linear PCM16
+function muLawToLinear16(muLawBuffer: Buffer): Buffer {
+  const muLawToLinear16Table = new Int16Array(256);
+  
+  for (let i = 0; i < 256; i++) {
+    let sample = ~i;
+    let sign = (sample & 0x80) ? -1 : 1;
+    let exponent = (sample >> 4) & 0x07;
+    let mantissa = sample & 0x0F;
+    let linear = (mantissa << 1) + 33;
+    linear <<= ((exponent + 2));
+    linear -= 33;
+    muLawToLinear16Table[i] = sign * linear;
+  }
+  
+  const output = new Int16Array(muLawBuffer.length);
+  for (let i = 0; i < muLawBuffer.length; i++) {
+    output[i] = muLawToLinear16Table[muLawBuffer[i]];
+  }
+  return Buffer.from(output.buffer);
+}
+
+// Upsample de 8kHz a 16kHz para Google
+function upsampleTo16k(pcm8k: Buffer): Buffer {
+  const samples8k = new Int16Array(pcm8k.buffer, pcm8k.byteOffset, pcm8k.length / 2);
+  const samples16k = new Int16Array(samples8k.length * 2);
+  
+  for (let i = 0; i < samples8k.length; i++) {
+    samples16k[i * 2] = samples8k[i];
+    samples16k[i * 2 + 1] = samples8k[i]; // Simple duplicación
+  }
+  
+  return Buffer.from(samples16k.buffer);
+}
+
 export class PartyKitDurable implements DurableObject {
   state: DurableObjectState;
   env: Env;
@@ -83,18 +118,29 @@ export class PartyKitDurable implements DurableObject {
     }
   }
 
-  // SOLUCIÓN: Enviar Mu-Law directamente a Google
+  // CONVERSIÓN CORRECTA: Mu-Law 8kHz → PCM16 16kHz
   sendAudioToGoogle(base64Payload: string) {
     try {
-        // Google AI acepta Mu-Law directamente con el MIME type correcto
+        // 1. Decodificar Mu-Law de Twilio
+        const muLawBuffer = Buffer.from(base64Payload, 'base64');
+        
+        // 2. Convertir Mu-Law → Linear PCM16 (8kHz)
+        const pcm8kBuffer = muLawToLinear16(muLawBuffer);
+        
+        // 3. Upsample 8kHz → 16kHz (Google prefiere 16kHz o 24kHz)
+        const pcm16kBuffer = upsampleTo16k(pcm8kBuffer);
+        
+        // 4. Enviar a Google
+        const pcmBase64 = pcm16kBuffer.toString('base64');
+        
         this.googleAISession?.sendRealtimeInput({
             media: {
-              data: base64Payload, // Enviar directamente el base64 de Twilio
-              mimeType: "audio/mulaw;rate=8000" // ✅ CORRECTO: Mu-Law 8kHz
+              data: pcmBase64,
+              mimeType: "audio/pcm;rate=16000" // ✅ CORRECTO
             }
         });
     } catch (err) {
-        console.error("[ERROR] Sending audio to Google:", err);
+        console.error("[ERROR] Converting audio:", err);
     }
   }
 
@@ -122,7 +168,6 @@ export class PartyKitDurable implements DurableObject {
             console.log("[GOOGLE] ✅ Connected!");
             this.isGoogleAIConnected = true;
             
-            // Procesar cola pendiente
             console.log(`[GOOGLE] Processing ${this.pendingAudioQueue.length} queued audio chunks`);
             while (this.pendingAudioQueue.length > 0) {
               const payload = this.pendingAudioQueue.shift();
@@ -130,7 +175,6 @@ export class PartyKitDurable implements DurableObject {
             }
           },
           onmessage: (message) => {
-            // Extraer audio de la respuesta
             const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             
             if (audioData) {
@@ -138,7 +182,7 @@ export class PartyKitDurable implements DurableObject {
                 
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                     try {
-                        // Google devuelve PCM 24kHz, necesitamos Mu-Law 8kHz para Twilio
+                        // Google devuelve PCM 24kHz, convertir a Mu-Law 8kHz
                         const pcm24kBuffer = Buffer.from(audioData, 'base64');
                         const pcm8kBuffer = downsampleBuffer(pcm24kBuffer, 24000, 8000);
                         const muLawBuffer = linear16ToMuLaw(pcm8kBuffer);
@@ -157,13 +201,17 @@ export class PartyKitDurable implements DurableObject {
                 }
             } else if (message.serverContent?.turnComplete) {
                 console.log("[GOOGLE] Turn complete");
-            } else {
-                // Mensaje sin audio (probablemente metadatos)
-                const msgPreview = JSON.stringify(message).substring(0, 150);
-                console.log("[GOOGLE] Non-audio message:", msgPreview);
             }
           },
-          onerror: (e) => console.error("[GOOGLE] Error:", e),
+          onerror: (e) => {
+            // Mejor logging del error
+            console.error("[GOOGLE] Error:", e);
+            if (e instanceof Error) {
+              console.error("[GOOGLE] Error details:", e.message, e.stack);
+            } else if (e && typeof e === 'object') {
+              console.error("[GOOGLE] Error object:", JSON.stringify(e, null, 2));
+            }
+          },
           onclose: () => {
             console.log("[GOOGLE] Connection closed");
             this.onClose();
@@ -173,6 +221,9 @@ export class PartyKitDurable implements DurableObject {
 
     } catch (error) {
       console.error("[ERROR] Failed to connect to Google:", error);
+      if (error instanceof Error) {
+        console.error("[ERROR] Details:", error.message, error.stack);
+      }
     }
   }
 
